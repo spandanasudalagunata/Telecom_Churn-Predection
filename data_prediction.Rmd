@@ -1,0 +1,196 @@
+---
+title: "Data_prediction"
+output: html_notebook
+---
+
+```{r warning = F}
+library("dplyr")
+library("magrittr")
+library("ggplot2")
+library("fiftystater")
+library("corrplot")
+```
+
+```{r echo = F}
+load("./data/model_building.rda")
+load("./data/customers_to_predict.Rdata")
+```
+
+# 1. Making The Prediction 
+```{r}
+Churn_Prob <- predict(modelRF, newdata = Customers_To_Predict, type = "response")
+
+hist(Churn_Prob, 100)
+```
+
+`Churn_Prob` contains all the probalities (from 0 to 1) that a customer from a pool of 1000 customers will churn or not. The histogram above reveals the distribution of the probabilities of churn across the 1000 customers we predicted. The histogram tells us that most customers stayed meaning that they did not churn since the frequency of a customer not churning was higher between the probabilites of 0.0 to 0.5 with the larger subset between 0.0 to 0.2 (our group concluded that 0.5 was threshold for a customer churning or not). Previous research [^1] done on churn rate for wireless carriers suggested that the ideal churn rate was between 1.9 to 2.0. 
+
+Another researcher further indicates that a good churn rate is between 5% to 7% annual or 0.42% - 0.58% monthly. This means that companies with acceptable churn only loose 1 out of every 200 customers per month [^2].
+
+Using the threshold (cutoff) of __0.2__ for churning that was concluded in the model building stage, we obtain the "yes" and "no" churn responses for the `Customers_To_Predict` dataframe.
+
+```{r}
+churn <- rep("no", nrow(Customers_To_Predict))
+churn[Churn_Prob > 0.2] = "yes"
+
+Customers_To_Predict$churn <- as.factor(churn) # Assign the responses into a variable called churn in the dataframe.
+```
+
+# 2. Insights from Prediction
+
+## 2.1 Churn Rate per State
+
+Given that we know the customers that churned or not, it would be advantageous to visualize the churn rate of customers in each state represented in `Customers_To_Predict` dataframe.
+
+```{r}
+calc.churn_rate <- function(churn) {
+  count_churn <- function(value) {
+    return (churn %>%
+              subset(churn == value) %>%
+              length())
+  }
+  
+  num_yes <- count_churn("yes")
+  
+  return(num_yes/length(churn) * 100)
+}
+
+state_churn_rate <- Customers_To_Predict %>%
+  select(state, churn) %>%
+  group_by(state) %>%
+  summarise(churn_rate = calc.churn_rate(churn))
+
+state_churn_rate
+```
+
+```{r fig.width = 8, fig.height = 7}
+ggplot(state_churn_rate, aes(x = reorder(state, churn_rate),  y = churn_rate, fill = state)) +
+  geom_bar(stat = 'identity') +
+  coord_flip() +
+  theme_minimal() +
+  guides(fill = F) +
+  labs(x = "States", y = "Churn Rate", title = "Churn Rate of Customers per US State")
+```
+```{r echo = F}
+# us_map_data has all the data needed to plot the fifty states on a map
+us_map_data <- merge(
+  fifty_states,
+  data.frame(
+    # Add missing state DC
+    state = c(state.abb, "DC"),
+    id = tolower(c(state.name, "district of columbia"))
+  ),
+  by = "id",
+  all = T
+)
+```
+
+```{r echo = F}
+# We will merge the the state_churn_rate of the state in state_churn_rate to the us_map_data
+state_churn_rate <- merge(state_churn_rate, us_map_data, by = "state") %>%
+  select(id, churn_rate, long, lat, group) %>%
+  distinct()
+```
+
+```{r echo = F}
+# Using the state.center list we can find out the exact center of each state
+state_ctrs <- data.frame(
+    state = c(state.abb, "DC"),
+    c_long = c(state.center$x, 38.889931) ,
+    c_lat = c(state.center$y, -77.009003)
+  ) %>%
+  merge(us_map_data, ., by = "state") %>%
+  select(state, id, c_long, c_lat) %>%
+  distinct()
+```
+
+![Map of each State's Population as of 2013](./data/images/Map_of_each_state's_population_as_of_2013.svg)
+
+```{r}
+ggplot(us_map_data, aes(x = long, y = lat)) +
+  geom_map(
+    map = us_map_data,
+    color="#ffffff",
+    aes(map_id = id)
+  ) +
+  geom_map(
+    data = state_churn_rate,
+    map = us_map_data,
+     color="#ffffff",
+    aes(fill = churn_rate, map_id = id)
+  ) +
+  scale_fill_continuous(low = 'thistle2', high = 'darkred', guide='colorbar') +
+  geom_text(
+    data = state_ctrs,
+    size = 2,
+    aes(x = c_long, y = c_lat, label = state)
+  ) +
+  coord_cartesian(xlim = c(-130, -65), ylim = c(24, 51)) +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text = element_blank(),
+    panel.background = element_blank(),
+    panel.border = element_blank()
+  ) +
+  labs(x = NULL, y = NULL, title = "Churn Rate of Customers per US State")
+```
+
+There seems to be a direct, but not perfect positive correlation between churn rates and population density. For example, the states typically with the highest churn rates where WA, UT, IL, OK, NJ, and NY. Those states with moderate churn included TX, MI, IA, IN, NV, MS, OK, and ME.  
+
+From of the stepwise classification analysis, with churn as the dependent variable, we found that the following states from the initial model building were of interest (i.e., significant contribution in predicting churn at the .05 level or less): CA, ME, MI, MN, MS, MT, NJ, NV, SC, TX, UT, and WA.  Please note that the states ME, MS, NV, and UT were theoretically not statistically significant at the 0.05 but were approaching .05. In comparing the states with relatively higher population and churn rates (i.e., comparing the lists of moderate to highest for both) included CA, TX, and NY. Other states of interest include OH, PA, IL, AZ, IN, OK, ME, IL, and WA.
+
+
+## 2.2 How Predictors Affect Churn
+
+### 2.2.1 Correlation of Numeric Predictors
+  
+```{r}
+Customers_To_Predict %>%
+  select_if(.predicate = function(x) !is.factor(x)) %>%
+  cor() %>%
+  corrplot()
+```
+
+This correlation plot simply tells us that the more time spent calling (day, evening, or night) the more the charge. It is positive correlation between minutes spent in a call (day, evening, or night) and charges incurred (day, evening, or night). The negative correlations are very minuscule due to faded red regions present.
+
+### 2.2.2 How does Number of Service Calls Affect Churn
+
+```{r}
+ggplot(Customers_To_Predict, aes(x = churn, y = number_customer_service_calls)) + 
+  geom_bar(stat='identity', aes(fill = churn), width=.5)
+```
+
+The number of service calls has a direct correlation with churn. It can be said that customers with more number of service calls are satisfied with the customer service provided by ABC wireless and choose not to churn.
+
+On the other hand customers with lower number of service calls are not happy with the resolutions of their issues and become more likely to churn.
+
+We recommend that ABC Wireless improves on their customer service call center and keep in regular contact with their customers in order to improve their retention rate of existing customers.
+
+### 2.2.3 How does Total Day Calls and Total Day Charges Affect Churn
+
+```{r}
+ggplot(data = Customers_To_Predict, aes(total_eve_minutes, total_day_calls, color = churn)) +
+  geom_smooth(method = "loess", se = FALSE, formula = y ~ poly(x, 2))
+```
+
+As shown in the graph there is a dipolar relationship, the people who did not churn were catergorized by low total evening minutes and lower total day calls; resulting in higher totals and evening minutes and day calls. 
+
+For those who churned the opposite were true. We recommend that ABC wireless offers more competitive packages that take advantage of these dipolar relationships
+
+### 2.2.4 Total International Calls and Total International Charges Affect Churn
+
+```{r warning = F}
+ggplot(data = Customers_To_Predict, aes(total_intl_calls, total_intl_charge, color = churn:international_plan)) +
+  geom_smooth(method = "loess", se = FALSE, formula = y ~ poly(x, 2))
+```
+
+For those who do not churn and do not have internation plan, they still make the most total international calls with initially the highest total international charges (we suspect these customers to be new ones). There appears to be a middle range between 3 and 8 on the x-axis that is the same for all users, for those that did churn and did not have an international plan (green curve) had higher total international charges.
+
+We recommend that ABC wireless should promote their international plans more competitevely in order to reduce churn.
+
+__NOTE__: We focused on only the numerical variables `total_intl_charge`, `total_intl_calls`, `total_eve_minutes`, `total_eve_charge` and categorical variable `international_plan` when discussing their affect on `churn` due to time constraint and their sign and size of their coefficients and statistical significance. 
+
+# References
+
+[^1]: FierceWireless. (n.d.). Average monthly churn rate for wireless carriers in the United States from 1st quarter 2013 to 1st quarter 2018. In Statista - The Statistics Portal. Retrieved November 25, 2018, from https://www.statista.com/statistics/283511/average-monthly-churn-rate-top-wireless-carriers-us/.
+[^2]: https://www.facebook.com/LincolnMurphyShares. (2015, July 30). SaaS Churn Rate - What’s Acceptable? Retrieved November 25, 2018, from https://sixteenventures.com/saas-churn-rate

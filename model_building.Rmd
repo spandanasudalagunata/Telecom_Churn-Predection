@@ -1,0 +1,148 @@
+---
+title: "Model Building"
+output: html_notebook
+---
+
+```{r warning = F}
+library("magrittr")
+library("ggplot2")
+library("ROCR")
+library("pROC")
+```
+
+```{r echo = F}
+load("./data/data_prep.rda")
+```
+
+```{r echo = F}
+# A function to split data into training (70%) and validation (30%)
+
+create_data_partition <- function(dataset, train_size = 0.70) {
+  # Creates a value for dividing the data into train and test.
+  smp_size = cdf_rf.imputed %>%
+    nrow() %>%
+    multiply_by(train_size) %>%
+    floor()
+
+  # Randomly identifies the rows equal to sample size from all the rows of dataset dataset
+  # and stores the row number in train_ind
+  return(dataset %>%
+           nrow() %>%
+           sample(x = seq_len(.), size = smp_size)
+  )
+}
+```
+
+# 1. Spliting Dataset into Training and Test
+  
+The dataset was split between to subgroup training and test to aviod any sense of biases and to also obtain better results and always give us a chance to test the accuracy of the result before committing to this train and test split our group decided on agreeing on a seed (123), The major advantage of setting a seed is that you can get the same sequence of random numbers whenever you supply the same seed in the random number generator and also improve reproducibility of our model training, and creates a constancy of results amoung the AUC.
+
+```{r}
+set.seed(123)
+
+rf_train_index <- create_data_partition(cdf_rf.imputed)
+knn_train_index <- create_data_partition(cdf_knn.imputed)
+
+train_df_knn <- cdf_knn.imputed[knn_train_index,]
+test_df_knn <- cdf_knn.imputed[-knn_train_index,]
+train_df_rf <- cdf_rf.imputed[rf_train_index,]
+test_df_rf <- cdf_rf.imputed[-rf_train_index,]
+```
+
+# 2. Building The Models
+
+In this stage of the we focus on the model building aspect of our report. The building of the model is used to to generate predictions, these predictions includes the international_planyes, voice_mail_planyes, etc. To find out which model is better we will compare the coefficients for both models (ModelRF and ModelKNN) listed below.
+When comparing against the Churn, as the dependent variable, the ModelRf and ModelKNN demostrates similiar findings. It shows the international_planyes has a positive correlation in both models, The only parameters that show a negative attributes for both ModelRf and ModelKNN are voice_mail_planyes, total_eve_minutes and total_intl_calls A possib;e exlanation for this developement is that the more these variables increase, the more churn decreases. However, totl_eve_minutes is a poor predictor of churn. It is beneficial because we are trying to keep churn as small as possible in comparison to the others variables (i.e., international_planyes,total_day_charge,total_day_calls,total_eve_charge,total_night_minutes,total_intl_charge,number_customer_service_calls)s . These  variable illustrate that an increase in these section would also cause an increase in in churn.
+```{r}
+modelRF <- glm(
+  churn~international_plan +
+    voice_mail_plan +
+    total_day_charge +
+    total_day_calls +
+    total_eve_charge +
+    total_eve_minutes +
+    total_night_minutes +
+    total_intl_charge +
+    total_intl_calls +
+    number_customer_service_calls,
+  data = train_df_rf ,
+  family = "binomial"
+)
+
+summary(modelRF)
+```
+
+
+
+```{r}
+modelKNN <- glm(
+  churn~international_plan +
+    voice_mail_plan +
+    total_day_charge +
+    total_day_calls +
+    total_eve_charge +
+    total_eve_minutes +
+    total_night_minutes +
+    total_intl_charge +
+    total_intl_calls +
+    number_customer_service_calls,
+  data = train_df_knn,
+  family = "binomial"
+)
+
+summary(modelKNN)
+```
+
+# 3. Predicting & Evaluating Accuracy
+
+In comparing the the prediction and accuracy of our two models "ModelRF" and "ModelKNN", which are listed below. However, before we move on to this analysis, we need to establish the meaning of the AUC. The AUC is the area under the curve, measure of accuracy fit of our model, which is calculated into a single varible to determine the better accuracy results. 
+Listed below you will find that the "ModelRF" has a 82% accuracy rate in compare to the "ModelKNN" that has a 80% accuracy rate which means that the "ModelRF" would be the ideal choice between both models. One can argue that both models delivers acceptable AUC metrics.
+
+## 3.1 Evaluating The Accuracy of `modelRF`
+The "ModelRF" has a AUC of 82% of accuracy.
+
+```{r}
+pred_churn_rf <- predict(modelRF, newdata = test_df_rf, type = "response")
+roc_out_rf <- roc(test_df_rf$churn, pred_churn_rf)
+
+roc_out_rf
+```
+
+
+```{r}
+plot(roc_out_rf, col = "red", xlab = "False Positive", ylab = "True Positive")
+```
+
+The ROC curve is an evaluation method we used to assess the efficacy of binary characteristic algorithm as well as choose the optimal threshold based on our tolerance for false negatives and desire for true positives. Here we have a curve that shows a reltively good result based on its usefulness as predictor. As displayed on the graph, the x axis shows the False Positive and the y axis shows the True Positive. The area under the curve is used as a singular measure for assessing the usefulness of a classifier. For a perfect classifier the area under the ROC curve would be 1.
+Therefore, the higher the AUC we have greater confidence in the predictive nature of our model.
+
+
+## 3.2 Evaluating The Accuracy of `modelKNN`
+The "ModelKNN" has a AUC of 80% 
+```{r}
+pred_churn_knn <- predict(modelKNN, newdata = test_df_knn, type = "response")
+roc_out_knn <- roc(test_df_knn$churn, pred_churn_knn)
+roc_out_knn
+```
+
+```{r}
+plot(roc_out_knn, col = "red", xlab = "False Positives", ylab = "True Positives")
+```
+
+# 4. Evaluating The Winining Model
+
+```{r}
+predicted_churn_status <- as.factor(pred_churn_rf > 0.2)
+levels(predicted_churn_status)  <- list(no = "FALSE", yes = "TRUE")
+confusion_matrix <- table(predicted_churn_status, actual_churn_status = test_df_rf$churn)
+
+confusion_matrix
+```
+
+The group reached a consesus on the threshold to use for our model. __0.2__ Provided the best confusion matrix, looking at our prediction churn status findings and our actual churn status findings, we found out our misclassification rate to be:
+
+__(186 + 81)/1547 errors - 1.73% misclassification rate, a relatively low rate.__
+
+```{r}
+save(modelKNN, modelRF, file = "data/model_building.rda")
+```

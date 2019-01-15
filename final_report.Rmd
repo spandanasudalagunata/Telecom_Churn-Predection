@@ -1,0 +1,964 @@
+---
+title: "Churn Classifier Final Report"
+output:
+  html_document:
+    df_print: paged
+---
+by 
+
+* Uzoma M. (Team Leader) (Data Exploration & Model Prediction)
+* Alan S. (Data Preparation & Model Prediction)
+* Spandana S. (Data Preparation & Model Prediction)
+* Clifton R. (Data Preparation & Model Prediction)
+* Kareem R. (Model Building & Model Prediction)
+
+
+# Data Exploration
+
+```{r warning = F}
+library("dplyr")
+library("magrittr")
+library("ggplot2")
+library("fiftystater")
+```
+
+## 1. Feel of the data
+
+We will first get a feel for our data set by getting a summary of the dataframe `churn_df`.
+
+```{r}
+churn_df <- read.csv("data/churn_train.csv", na.strings = c("", "NA"))
+
+summary(churn_df)
+```
+
+From the summary we can see that a lot of `NA` values are present in many columns execpt for the columns (variables) `state`, `area_code`, `international_plan`, `voice_mail_plan`, `total_night_calls`, and `churn`.
+
+Out of the 6 variables that don't have any `NA`s in them 5 are factors named `r churn_df %>% select_if(is.factor) %>% names() %>% sapply(function(x) sprintf("'%s'", x))`. Five is also the total number of factors that can be observed in our data set, the rest are numerical variables.
+
+If we take a closer look at the factor variables, the variable `state` seems to represent states from the USA (51 states in total). Below is a frequency table and a histogram showing us where most of the customers observed in the churn dataset come from in the US.
+
+```{r}
+state_freq <- churn_df %>%
+  select(state) %>%
+  group_by(state) %>%
+  summarise(freq  = n()) %>%
+  arrange(desc(freq))
+
+state_freq %>% head()
+```
+
+```{r fig.width = 8, fig.height = 7}
+ggplot(state_freq, aes(x = reorder(state, freq), y = freq, fill = state)) +
+  geom_bar(stat = 'identity') +
+  coord_flip() +
+  theme_minimal() +
+  guides(fill = F)
+```
+
+From the table and the histogram above we can see that __West Virginia__ represents most the customers with a total of __106__ customers. However, let's see a visual representation of the density of customers on a map.
+
+```{r echo = F}
+# us_map_data has all the data needed to plot the fifty states on a map
+us_map_data <- merge(
+  fifty_states,
+  data.frame(
+    # Add missing state DC
+    state = c(state.abb, "DC"),
+    id = tolower(c(state.name, "district of columbia"))
+  ),
+  by = "id",
+  all = T
+)
+```
+
+```{r echo = F}
+# We will merge the the frequencies of the state in state_freq to the us_map_data
+state_freq <- merge(state_freq, us_map_data, by = "state") %>%
+  select(id, freq, long, lat, group) %>%
+  distinct()
+```
+
+```{r echo = F}
+# Using the state.center list we can find out the exact center of each state
+state_ctrs <- data.frame(
+    state = c(state.abb, "DC"),
+    c_long = c(state.center$x, 38.889931) ,
+    c_lat = c(state.center$y, -77.009003)
+  ) %>%
+  merge(us_map_data, ., by = "state") %>%
+  select(state, id, c_long, c_lat) %>%
+  distinct()
+```
+
+```{r}
+ggplot(us_map_data, aes(x = long, y = lat)) +
+  geom_map(
+    map = us_map_data,
+    color="#ffffff",
+    aes(map_id = id)
+  ) +
+  geom_map(
+    data = state_freq,
+    map = us_map_data,
+     color="#ffffff",
+    aes(fill = freq, map_id = id)
+  ) +
+  scale_fill_continuous(low = 'thistle2', high = 'darkred', guide='colorbar') +
+  geom_text(
+    data = state_ctrs,
+    size = 2,
+    aes(x = c_long, y = c_lat, label = state)
+  ) +
+  coord_cartesian(xlim = c(-130, -65), ylim = c(24, 51)) +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text = element_blank(),
+    panel.background = element_blank(),
+    panel.border = element_blank()
+  ) +
+  labs(x = NULL, y = NULL, title = "Density of customers per US state")
+```
+
+## 2. What's Up With The Negatives
+
+From the output of the summary we noticed that some variables had negative values present in them, let's take a look at those variables:
+
+```{r}
+churn_df %>%
+  select(account_length, number_vmail_messages) %>%
+  summary()
+```
+
+`account_length` has values ranging from -209 and 243. The variable `account_length` is not immediatley obvious what it represents but in the domain of this data set, `account_length` represents how long a customer has had an account in terms of months (we are assuming `account_length` is in months). With that being said `account_length` should not contain any negative values.
+
+`number_vmail_messages` has values ranging from -10 to 51, this variable represents the number of voice mail messages a customer has had, clearly such a variable should not have negative values in them.
+
+## 3. NAs Everywhere
+
+16 out of the 20 variables (columns) have `NA` values where `NA` means that the value is missing. Further analysis of the summary of our dataframe reveals that 10 variables have about __200__ `NA` values while 2 have __301__ and 1 has __501__.
+
+For a better understanding of the presence of `NA`s in our dataframe. Let's look at the percentage of `NA`s accross all the variables in the dataframe.
+
+```{r}
+# A function to compute the percentage of NAs accross all columns.
+na_percentage <- function(df, fmt = F) {
+  return (df %>%
+            is.na() %>%
+            colMeans() %>%
+            sapply(function(x) {
+              if (fmt) {
+                return(sprintf("%.5f%%", x * 100))
+              }
+
+              return (x)
+            })
+          )
+}
+
+na_percent_df <- na_percentage(churn_df) %>%
+  data_frame(Columns = names(.), `NA %` = .) %>%
+  mutate_at(
+    vars(`NA %`),
+    funs(round(. * 100, 2))
+  ) %>%
+  mutate(label = sprintf("%g%%", `NA %`)) %>%
+  arrange(desc(`NA %`))
+
+na_percent_df %>% select(-label) %>% head()
+```
+
+The table above lists all the variables (columns) and their respective percentage of `NA`s. We can see that most categorical variables such as `state`, `area_code`, `international_plan`, etc. including `total_night_calls` (numerical variable) have no `NA` values in them.
+
+The bar chart below provides a visual representation of the percentage of `NA` in the dataset. We can see that `account_length`, `total_intl_calls` and `total_intl_charge` contribute the most `NA`s with `account_length` being the top contributor.
+
+```{r}
+na_percent_df %>%
+  filter(`NA %`> 0) %>%
+  ggplot(aes(x = Columns, y = `NA %`, fill = Columns)) +
+  geom_bar(stat="identity") +
+  guides(fill = F) +
+  coord_flip() +
+  geom_text(aes(label = label), hjust = 1.6, size = 3.5) +
+  theme_minimal()
+```
+
+Further analysis of the `NA` percentage table, we noticed that 11 variables have an `NA` percentage of __6%__. Such a pattern is interesting and deserves a closer look.
+
+Below is a table that shows only the variables that have `NA` in them. The code chunk removes columns that have an `NA` percentage of __0%__ and then only shows rows that have at least 1 `NA` value in them.
+
+
+```{r}
+na_df <- churn_df %>%
+  select(-state, -area_code, -international_plan, -voice_mail_plan, -total_night_calls, -churn) %>%
+  filter_all(any_vars(is.na(.)))
+
+head(na_df)
+```
+
+```{r echo = F}
+na_df_stats <- na_df %>%
+  is.na() %>%
+  rowMeans() %>%
+  data_frame(`NA %` = .) %>%
+  group_by(`NA %`) %>%
+  summarise(freq = n()) %>%
+  mutate_at(
+      .vars = vars(`NA %`),
+      .funs = function(x) sprintf("%.2f%%", x * 100)
+  )
+```
+
+
+We can see that there are many `NA` values present in this the `r nrow(na_df)` row subset of our data set. There are `r na_df_stats$freq[1]` rows that have at least __1__ `NA` in one of their columns while `r na_df_stats$freq[2]` rows have all its elements consisting of completely `NA` values.
+
+## 4. Preliminary Data Cleaning
+
+### 4.1 Turning Negatives into Positives
+
+In order to deal with those variables that have negative values in them, the simple strategy is to turn all the numbers for each variable in question to positive using the `abs` function.
+
+```{r}
+churn_df <- churn_df %>%
+  mutate_at(.vars = vars(account_length, number_vmail_messages), .funs = funs(abs))
+
+summary(churn_df)
+```
+
+From the summary table, we can see that all our variables are positive. `account_length` ranges from 1 to 243 and `number_vmail_messages` ranges from 0 to 51.
+
+### 4.2 No More NAs
+
+Rows in which we have discovered that are completely filled up with `NA` values pose a problem for us. The problem is that they don't have enough data in them which we can use for predicting churn. Each row represents a customer and if a row has 14 elements (representing the 14 columns) consisting of `NA` then that customer is essentially incosiquential in the training of our model.
+
+Imputing of missing values is an approach to solving this problem but in this particular case it would be pointless to do so for rows which have so much of its predictive power missing. There are some rows in which we can impute missing values in, these rows can be salvaged because the percentage of `NA`s in them is not 100%.
+
+The best course of action is to remove rows that have more than __75%__ of its elements that are `NA`. __75%__ is an arbitrary threshold that has been chosen based on the consesus of the group which we believe will keep rows that are salvageable and remove the rows that are unimportant.
+
+```{r}
+churn_df_1 <- churn_df[rowMeans(is.na(churn_df)) <= 0.25,]
+summary(churn_df_1)
+```
+
+Let's look at the percentage of `NA`s in the data set after removing rows with __75%__ of its elements being `NA` and how its has changed.
+
+```{r}
+na_df_1 <- na_percentage(churn_df_1) %>%
+  data_frame(Columns = names(.), `NA %` = .) %>%
+  mutate_at(
+    vars(`NA %`),
+    funs(round(. * 100, 2))
+  ) %>%
+  mutate(label = sprintf("%g%%", `NA %`)) %>%
+  arrange(desc(`NA %`))
+
+head(na_df_1)
+```
+
+Let's look at a visual presentation of how the `NA` values have changed.
+
+```{r}
+na_df_1 %>%
+  filter(`NA %`> 0) %>%
+  ggplot(aes(x = Columns, y = `NA %`, fill = Columns)) +
+  geom_bar(stat="identity") +
+  guides(fill = F) +
+  coord_flip() +
+  geom_text(aes(label = label), hjust = 1.6, size = 3.5) +
+  theme_minimal()
+```
+
+Let's subset our dataset and look at the columns we initially identified has having at least 1 NA in them.
+
+```{r}
+churn_df_1 %>%
+  select(-state, -area_code, -international_plan, -voice_mail_plan, -total_night_calls, -churn) %>%
+  filter_all(any_vars(is.na(.))) %>%
+  head()
+```
+
+The number of rows initially was 703 and now its 503, we have removed the __200__ rows where the population of `NA`s were 75%, reducing our overall dataset from __`r nrow(churn_df)`__ to __`r nrow(churn_df_1)`__.
+
+Now that we have removed rows which had very little information in them, we can focus on figuring out a strategy on filling in the missing values of our remaining 503 rows.
+
+### 4.3 The Remaining NAs
+
+```{r echo = F}
+sumNa <- churn_df_1 %>%
+  summarise(value = sum(is.na(.)))
+```
+
+We have about `r sumNa$value` `NA` values in total in our dataset of which `account_length` owns 9.61% of it while `total_eve_minutes` and `total_intl_class` both own 3.22%.
+
+Looking at `account_length` we were not convinced that it was statistically significant or that it had any predictive power when it came to predicting churn. In order to investigate our hypothesis, we compared the correlation of `churn` and  `account_length` using a box plot as seen below. The aim is to see whether `account_length` can clearly differentiate between __no__ and __yes__.
+
+```{r warning = F}
+ggplot(churn_df_1, aes(churn, account_length)) +
+  geom_boxplot()
+```
+
+The boxplot tells us that `account_length` can not differentiate between __no__ and __yes__. As `account_length` increases the number of __no__ and __yes__ varies very little meaning `account_length` is not a good predictor of `churn`.
+
+Upon validating our hypothesis, we decided on moving forward with the descision to omit `account_length` from the dataset. The benefit of this is that we get rid of the __301__ `NA` values in our dataset, which we would have had to spend time imputing for if we had kept `account_length`.
+
+The descision of omitting `account_length` from our data set benefits us in that
+
+1. It helps us avoid spending uneccesary effort in imputing a large percentage of missing values contributed by `account_length`
+2. We remove a variable that has neither predictive power or is statistically significance.
+
+## 5. Concluding The Exploration
+
+We will omit `account_length` from our data set and then view the summary.
+
+```{r}
+churn_df_2 <- churn_df_1 %>% select(-account_length)
+
+summary(churn_df_2)
+```
+
+Currently we have only __`r sum(is.na(churn_df_2))`__ `NA` values essentially removing __301__ `NA` values from `account_length`. We now need to impute values for __`r sum(is.na(churn_df_2))`__ `NA`s
+
+We will save the data frame, `churn_df_2`, that has gone through the preliminary data cleaning phase for data imputation.
+
+# Data Preparation
+
+```{r warning = F}
+library("randomForest")
+library("DMwR") # for kNN imputation
+```
+
+## 6. Data Imputation
+
+### 6.1 Data Imputation using RandomForest
+
+The proximity matrix from the randomForest is used to update the imputation of the NAs. For continuous predictors, the imputed value is the weighted average of the non-missing observations, where the weights are the proximities. For categorical predictors, the imputed value is the category with the largest average proximity. This process is iterated n times.
+
+```{r results = 'hide'}
+cdf_rf.imputed <- rfImpute(churn ~ ., data = churn_df_2)
+```
+
+```{r}
+summary(cdf_rf.imputed)
+```
+
+### 6.2 Data Imputation using kNN
+
+kNN is useful for matching a point with its closest k neighbors in a multi-dimensional space and can be used for data that are continuous, discrete, ordinal and categorical which makes it particularly useful for dealing with most kinds of missing data.The assumption behind using KNN for missing values is that a point value can be approximated by the values of the points that are closest to it, based on other variables.
+When using KNN, you have to take many parameters into consideration:
+The number of neighbors to look for. Taking a low k will increase the influence of noise and the results are going to be less generalizable while taking a high k will tend to blur local effects which are exactly what we are looking for.
+The aggregation method to use. Here we allow for arithmetic mean, median and mode for numeric variables and mode for categorical ones.
+Normalizing the data is a method that allows to give every attribute the same influence in identifying neighbors when computing certain type of distances like the Euclidean one.The algorithm automatically normalize the data when both numeric and categorical variable are provided.
+Numeric attribute distances: among the various distance metrics available, we will focus on the main ones, Euclidean and Manhattan. Euclidean is a good distance measure to use if the input variables are similar in type (e.g. all measured widths and heights). Manhattan distance is a good measure to use if the input variables are not similar in type (such as age, height, etc.).
+Categorical attribute distances: without prior transformation, applicable distances are related to frequency and similarity. Here we allow the use of two distances: Hamming distance and the Weighted Hamming distance.
+- Hamming distance: take all the categorical attributes and for each, count one if the value is not the same between two points. The Hamming distance is then the number of attributes for which the value was different.
+- Weighted Hamming distance: also return one if the value is different, but returns the frequency of the value in the attribute if they are matching, increasing the distance when the value is more frequent. When more than one attribute is categorical, the harmonic mean is applied. The result remain between zero and one but the mean value is shifted toward the lower values compared to the arithmetic mean.
+Binary attribute distances: those attributes are generally obtained via categorical variables transformed into dummies.
+
+```{r}
+cdf_knn.imputed <- knnImputation(churn_df_2)
+```
+
+```{r}
+summary(cdf_knn.imputed)
+```
+
+### 6.3 kNN vs RandomForest for Data Imputation
+
+In order to compare the the values imputed using kNN and RandomForest we must first extract the indexes in `churn_df_2` where there was an `NA`. Since both RandomForest and kNN only imputes values where there `NA` exists, we only have to look at the variables `total_intl_calls` and `total_eve_minutes` in which values were imputed.
+
+```{r}
+where.is_na <- function(df, var_name) {
+  return(which(is.na(extract(df, var_name))))
+}
+
+only.where_was_na <- function(df, var_name) {
+  return(df %>%
+           extract2(var_name) %>%
+           extract(where.is_na(churn_df_2, var_name))
+         )
+}
+
+# Create a data frame of all the imputed values from variables total_intl_calls and total_eve_minutes
+rf_knn_df <- data.frame(
+  kNN_total_intl_calls = cdf_knn.imputed %>% only.where_was_na("total_intl_calls"),
+  rf_total_intl_calls = cdf_rf.imputed %>% only.where_was_na("total_intl_calls"),
+  kNN_total_eve_minutes = cdf_knn.imputed %>% only.where_was_na("total_eve_minutes"),
+  rf_total_eve_minutes = cdf_rf.imputed %>% only.where_was_na("total_eve_minutes")
+)
+
+head(rf_knn_df)
+```
+
+The below plots show a visual representation of the imputed values from variables `total_intl_calls` and `total_eve_minutes` using both the kNN and RandomForest methods.
+
+```{r}
+ggplot(rf_knn_df) +
+  geom_point(aes(
+    x = seq_along(kNN_total_intl_calls),
+    y = kNN_total_intl_calls, colour = "kNN")
+  ) +
+  geom_point(aes(
+    x = seq_along(rf_total_intl_calls),
+    y = rf_total_intl_calls, colour = "Rainforest")
+  ) +
+  labs(x = "Index", y = "total_intl_calls", title = "kNN vs Rainforest for total_intl_calls")
+```
+
+For total_intl_calls:
+When using kNN for imputation, as the value of x increases, the kNN values are spread across 2.1 and 6.5 on the y-axis. Majority of the points lie in between 3.5 and 5 on the y-axis. It can be observed that as y increases, the values are more widespread and dispersed for values imputed using kNN.
+
+In the case of using RandomForest for imputation, the proximity of the values is high and in a narrow band. Majority of the points lie within a range of 4 and 5 on the y-axis. The values imputed by RandomForest vary very little having a more uniform dispersion along the x-axis compared to kNN.
+
+```{r}
+ggplot(rf_knn_df) +
+  geom_point(aes(
+    x = seq_along(kNN_total_eve_minutes),
+    y = kNN_total_eve_minutes, colour = "kNN")
+  ) +
+  geom_point(aes(
+    x = seq_along(rf_total_eve_minutes),
+    y = rf_total_eve_minutes, colour = "RandomForest")
+  ) +
+  labs(x = "Index", y = "total_eve_minutes", title = "kNN vs RandomForest for total_eve_minutes")
+```
+
+For total_eve_minutes:
+As `total_eve_minutes` on the y-axis increases, the values imputed by RandomForest are distributed across a broad ranging between 250 & 470 on the y-axis. Moving along the x-axis values imputed by RandomForest range quite a bit on the y-axis.
+
+Whereas for kNN, the values lie within a range of 100 - 350 on the y-axis. As you move along the x-axis you can observer that the variation of points change very little on the y-axis unlike values imputed by RandomForest.
+
+## 7. Stepwise Regression
+
+Stepwise regression is a semi-automated process of building a model by successively adding or removing variables based on the t-statistics of their estimated coefficients. The stepwise option lets you either begin with no variables in the model and proceed forward (i.e., adding one variable at a time) or start with all potential variables in the model and proceed backwards (i.e., removing one variable at a time). At each step, the program performs for each variable currently in the model the t-statistic for its estimated coefficient. For each variable not in the model, it computes the t-statistic that its coefficient would have if it were the next variable added, and squares it. At the next step, the program automatically enters the variable with the highest statistic (forward), or removes the variable with the lowest statistic (backward). In general, as in this case, if you have a modest-sized set of potential variables from which you wish to eliminate a few (i.e., if you're fine-tuning some prior selection of variables), you should generally go backward.
+
+Stepwise Logistic Regression with R Akaike information criterion (AIC), where AIC = 2k - 2 log L = 2k + Deviance, where k = number of parameters. In general, smaller numbers are better.  Stepwise Logistic Regression penalizes models with many independent or predictor parameters and with models with poor fit.  In general, the lower value of AIC suggests "better" model, but it is a relative measure of model fit. It is used for model selection (i.e. it lets you compare different models estimated on the same dataset. Backwards selection is the default in the Logistic Regression method, although there may be some evidence in the logistic regression literature that backward selection is less successful than forward selection. This may be due to the fact that the full model fit in the first step is the model most likely to result in a complete or quasi-complete separation of response values. However, backward seemed to be successful in this case. As a warning, since the interpretation of coefficients in a model depends on the other terms included, it may seem unwise to let an automatic algorithm determine the questions that we should ask about our data. The decision which variables to include into an analysis should be based on theory. However, there is little theory about these variables, so we need to operate on common business application.
+
+### 7.1 Stepwise Regression using kNN Imputed Data
+
+Using Stepwise Regression, we proceed to identify the variables that may have a significant impact in determining 'churn', using the kNN imputed values. The chunk also identifies states which may be impacted by churn.
+
+```{r}
+churn_model_knn <- glm(churn~., data = cdf_knn.imputed, family = "binomial")
+summary(churn_model_knn)
+```
+
+From the output of the churn model using stepwise regression on kNN imputed data, we see that the variables number_customer_service_calls, total_day_charge, international_planyes, total_intl_calls, voice_mail_planyes are projected to have a likely impact on 'churn' with the variables total_eve_minutes and total_day_minutes tending towards significance. The output also points towards states that may experience a higher churn rate than others (shown by * as well as by .). We will refine this output in the following steps using direction, backward and both.
+
+
+Using the 'backward' option, we proceed to identify the variables that have a significant impact in determining 'churn', using the kNN imputed values.
+
+```{r}
+stepwise_knn_bkwd = step(churn_model_knn, direction = c("backward"), trace = F)
+```
+
+
+```{r}
+summary(stepwise_knn_bkwd)
+```
+
+Continuing to refine the model with stepwise regression on kNN imputed data but including direction as 'backward', the model outputs the variables international_planyes, voice_mail_planyes, total_day_minutes, total_day_charge, total_eve_minutes, total_night_minutes, total_intl_calls, total_intl_charge and number_customer_service_calls as being significant towards predicition of churn.
+
+
+Continuing with using Stepwise Regression but amending direction to 'both', we again proceed to identify the variables that may have a significant impact in determining 'churn', using the kNN imputed values.
+The outputs from both chunks - direction backward & both - is seen to be identical in all respects.
+
+
+```{r}
+stepwise_knn_bth = step(churn_model_knn, direction = c("both"), trace = F)
+```
+
+
+```{r}
+summary(stepwise_knn_bth)
+```
+
+Continuing with stepwise regression on kNN imputed data but amending direction to 'both', the model outputs the variables international_planyes, voice_mail_planyes, total_day_minutes, total_day_charge, total_eve_minutes, total_night_minutes, total_intl_calls, total_intl_charge and number_customer_service_calls as being significant.
+We notice that these variables are the same as those identified in the 'backward' direction with AIC at 2060.2
+
+
+### 7.2 Stepwise Regression using Randomforest Imputed Data
+
+Using Stepwise Regression, we proceed to identify the variables that may have a significant impact in determining 'churn', using the RandomForest imputed values. The chunk also identifies states which may be impacted by churn.
+
+```{r}
+churn_model_rf <- glm(churn~., data = cdf_rf.imputed, family = "binomial")
+summary(churn_model_rf)
+```
+
+From the output of the churn model using stepwise regression on RandomForest imputed data, we see that the 6 variables number_customer_service_calls, total_day_charge, international_planyes, total_intl_calls, voice_mail_planyes and total_eve_charge are projected to have a likely impact on 'churn'. The output also points towards states that may experience a higher churn rate than others (shown by * as well as by .). We will refine this output in the following steps using direction, backward and both.
+
+Using the 'backward' option, we proceed to identify the variables that have a significant impact in determining 'churn', using the RandomForest imputed values.
+
+```{r}
+stepwise_rf_bkwd = step(churn_model_rf, direction = c("backward"), trace = F)
+```
+
+```{r}
+summary(stepwise_rf_bkwd)
+```
+
+Continuing with using Stepwise Regression and the RandomForest imputed values, but amending direction to 'both', we again proceed to identify the variables that may have a significant impact in determining 'churn'.
+
+On comparison of the outputs from both chunks - direction backward & both - it is seen to be identical in all respects.
+
+
+```{r}
+stepwise_rf_bth = step(churn_model_rf, direction = c("both"), trace = F)
+```
+
+```{r}
+summary(stepwise_rf_bth)
+```
+
+In general, the best model is the one with the lowest AIC possible in the logistic regression model with churn as the dependent variable. The final model with the most important variables in predicting churn were, in ascending order:
+
+1. `total_day_minutes`
+2. `total_night_minutes`
+3. `total_intl_charge`
+4. `total_eve_charge`
+3. `voice_mail_plan`
+4. `total_day_charge `
+5. `number_customer_service_calls`
+6. `international_plan`
+
+In other words, `international_plan` was considered the best predictor of churn followed by `number_customer_service_calls` etc. In backward, starting out with the full model, the single best predictor was `international_plan`.  This procedure was used to help in the creation of a best predicted model for churn as the dependent variable.
+
+### 7.3 Finding The Best Predictor Variables
+
+```{r echo = F}
+fmt_formula <- function(formula) {
+  return (formula %>%
+            as.character() %>%
+            extract(c(2, 1, 3)) %>%
+            paste(collapse = '')
+  )
+}
+```
+
+The table below shows the final models obtained from performing step wise regression in __backward__ direction. On the left we have the model using the RandomForest imputed missing values and on the right we have the model using the kNN imputed missing values.
+
+||RandomForest|kNN|
+|-----|:------|:-----|
+|AIC|`r stepwise_rf_bkwd$aic`|`r stepwise_knn_bkwd$aic`|
+|Formula|`r {fmt_formula(stepwise_rf_bkwd$formula)} `| `r {fmt_formula(stepwise_knn_bkwd$formula)} `|
+
+The table below shows the final models obtained from performing step wise regression in __both__ direction. On the left we have the model using the Rainforest imputed missing values and on the right we have a model using the kNN imputed missing values.
+
+||RandomForest|kNN|
+|-----|:------|:-----|
+|AIC|`r stepwise_rf_bth$aic`|`r stepwise_knn_bth$aic`|
+|Formula|`r {fmt_formula(stepwise_rf_bth$formula)} `| `r {fmt_formula(stepwise_knn_bth$formula)} `|
+
+
+The common variables in each of the four stepwise regressions are:
+
+1. `international_plan`
+2. `voice_mail_plan`
+3. `total_day_minutes`
+4. `total_day_charge`
+5. `total_night_minutes`
+6. `total_intl_calls`
+7. `total_intl_charge`
+8. `number_customer_service_calls`
+
+The variables that are not common to the four models are:
+
+1. `total_eve_minutes`
+2. `total_eve_charge`
+
+We suggest that these 10 variables be used in the next stage of the model building process.
+
+__Random forest significant attributes__
+```
+international_planyes          2.1972515  0.1589164  13.826  < 2e-16 ***
+voice_mail_planyes            -1.0275099  0.3676354  -2.795 0.005191 **
+total_day_charge               0.0805890  0.0080508  10.010  < 2e-16 ***
+total_eve_charge               0.0830480  0.0249265   3.332 0.000863 ***
+total_intl_calls              -0.0837351  0.0267472  -3.131 0.001744 **
+number_customer_service_calls  0.5395426  0.0420437  12.833  < 2e-16 ***
+```
+***
+```
+states (12)
+
+stateCA                        1.9772622  0.7938041   2.491 0.012743 *
+stateME                        1.2932594  0.7391097   1.750 0.080161 .
+stateMI                        1.4919750  0.7224169   2.065 0.038899 *
+stateMN                        1.2142000  0.7194116   1.688 0.091456 .
+stateMS                        1.2761173  0.7383695   1.728 0.083936 .
+stateMT                        1.7768485  0.7233884   2.456 0.014038 *
+stateNJ                        1.5639891  0.7174847   2.180 0.029271 *
+stateNV                        1.3044053  0.7301848   1.786 0.074034 .
+stateSC                        1.7432299  0.7519276   2.318 0.020430 *
+stateTX                        1.6774593  0.7127652   2.353 0.018600 *
+stateUT                        1.2332761  0.7465346   1.652 0.098534 .
+stateWA                        1.5031936  0.7340795   2.048 0.040587 *
+```
+Only RandomForest had an additional state MN as compared to KNN
+
+__KNN significant attributes__
+```
+international_plan             2.205e+00  1.594e-01  13.835  < 2e-16 ***
+voice_mail_plan               -1.252e+00  4.395e-01  -2.849  0.00438 **
+total_day_minutes             -5.762e-03  2.240e-03  -2.572  0.01010 *
+total_day_charge               1.074e-01  1.375e-02   7.813 5.58e-15 ***
+total_eve_minutes              1.106e-02  4.403e-03   2.511  0.01204 *
+total_intl_calls              -8.585e-02  2.679e-02  -3.205  0.00135 **
+number_customer_service_calls  5.432e-01  4.221e-02  12.868  < 2e-16 ***
+```
+***
+```
+states(11)
+stateCA                        1.956e+00  7.908e-01   2.473  0.01339 *
+stateME                        1.256e+00  7.389e-01   1.700  0.08904 .
+stateMI                        1.465e+00  7.217e-01   2.030  0.04234 *
+stateMS                        1.253e+00  7.375e-01   1.699  0.08926 .
+stateMT                        1.754e+00  7.235e-01   2.424  0.01535 *
+stateNJ                        1.539e+00  7.166e-01   2.148  0.03173 *
+stateNV                        1.217e+00  7.316e-01   1.663  0.09632 .
+stateSC                        1.735e+00  7.498e-01   2.314  0.02064 *
+stateTX                        1.674e+00  7.108e-01   2.355  0.01852 *
+stateUT                        1.229e+00  7.463e-01   1.646  0.09968 .
+stateWA                        1.471e+00  7.321e-01   2.009  0.04455 *
+```
+We note the following states for as being important to churn but not a good predictor of churn and therefore we chose to omit it from the model building phase.
+
+```
+stateCA
+stateME
+stateMI
+stateMN
+stateMS
+stateMT
+stateNJ
+stateNV
+stateSC
+stateTX
+stateUT
+stateWA
+```
+# Model Building
+
+```{r warning = F}
+library("pROC")
+```
+
+```{r echo = F}
+# A function to split data into training (70%) and validation (30%)
+
+create_data_partition <- function(dataset, train_size = 0.70) {
+  # Creates a value for dividing the data into train and test.
+  smp_size = cdf_rf.imputed %>%
+    nrow() %>%
+    multiply_by(train_size) %>%
+    floor()
+
+  # Randomly identifies the rows equal to sample size from all the rows of dataset dataset
+  # and stores the row number in train_ind
+  return(dataset %>%
+           nrow() %>%
+           sample(x = seq_len(.), size = smp_size)
+  )
+}
+```
+
+## 8. Spliting Dataset into Training and Test
+
+The dataset was split between to subgroup training and test to aviod any sense of biases and to also obtain better results and always give us a chance to test the accuracy of the result before committing to this train and test split our group decided on agreeing on a seed (123), The major advantage of setting a seed is that you can get the same sequence of random numbers whenever you supply the same seed in the random number generator and also improve reproducibility of our model training, and creates a constancy of results amoung the AUC.
+
+```{r}
+set.seed(123)
+
+rf_train_index <- create_data_partition(cdf_rf.imputed)
+knn_train_index <- create_data_partition(cdf_knn.imputed)
+
+train_df_knn <- cdf_knn.imputed[knn_train_index,]
+test_df_knn <- cdf_knn.imputed[-knn_train_index,]
+train_df_rf <- cdf_rf.imputed[rf_train_index,]
+test_df_rf <- cdf_rf.imputed[-rf_train_index,]
+```
+
+## 9. Building The Models
+
+In this stage of the we focus on the model building aspect of our report. The building of the model is used to to generate predictions, these predictions includes the international_planyes, voice_mail_planyes, etc. To find out which model is better we will compare the coefficients for both models (ModelRF and ModelKNN) listed below.
+When comparing against the Churn, as the dependent variable, the ModelRf and ModelKNN demostrates similiar findings. It shows the international_planyes has a positive correlation in both models, The only parameters that show a negative attributes for both ModelRf and ModelKNN are voice_mail_planyes, total_eve_minutes and total_intl_calls A possib;e exlanation for this developement is that the more these variables increase, the more churn decreases. However, totl_eve_minutes is a poor predictor of churn. It is beneficial because we are trying to keep churn as small as possible in comparison to the others variables (i.e., international_planyes,total_day_charge,total_day_calls,total_eve_charge,total_night_minutes,total_intl_charge,number_customer_service_calls)s . These  variable illustrate that an increase in these section would also cause an increase in in churn.
+```{r}
+modelRF <- glm(
+  churn~international_plan +
+    voice_mail_plan +
+    total_day_charge +
+    total_day_calls +
+    total_eve_charge +
+    total_eve_minutes +
+    total_night_minutes +
+    total_intl_charge +
+    total_intl_calls +
+    number_customer_service_calls,
+  data = train_df_rf ,
+  family = "binomial"
+)
+
+summary(modelRF)
+```
+
+
+
+```{r}
+modelKNN <- glm(
+  churn~international_plan +
+    voice_mail_plan +
+    total_day_charge +
+    total_day_calls +
+    total_eve_charge +
+    total_eve_minutes +
+    total_night_minutes +
+    total_intl_charge +
+    total_intl_calls +
+    number_customer_service_calls,
+  data = train_df_knn,
+  family = "binomial"
+)
+
+summary(modelKNN)
+```
+
+## 10. Predicting & Evaluating Accuracy
+
+In comparing the the prediction and accuracy of our two models "ModelRF" and "ModelKNN", which are listed below. However, before we move on to this analysis, we need to establish the meaning of the AUC. The AUC is the area under the curve, measure of accuracy fit of our model, which is calculated into a single varible to determine the better accuracy results.
+Listed below you will find that the "ModelRF" has a 82% accuracy rate in compare to the "ModelKNN" that has a 80% accuracy rate which means that the "ModelRF" would be the ideal choice between both models. One can argue that both models delivers acceptable AUC metrics.
+
+### 10.1 Evaluating The Accuracy of `modelRF`
+The "ModelRF" has a AUC of 82% of accuracy.
+
+```{r}
+pred_churn_rf <- predict(modelRF, newdata = test_df_rf, type = "response")
+roc_out_rf <- roc(test_df_rf$churn, pred_churn_rf)
+
+roc_out_rf
+```
+
+
+```{r}
+plot(roc_out_rf, col = "red", xlab = "False Positive", ylab = "True Positive")
+```
+
+The ROC curve is an evaluation method we used to assess the efficacy of binary characteristic algorithm as well as choose the optimal threshold based on our tolerance for false negatives and desire for true positives. Here we have a curve that shows a reltively good result based on its usefulness as predictor. As displayed on the graph, the x axis shows the False Positive and the y axis shows the True Positive. The area under the curve is used as a singular measure for assessing the usefulness of a classifier. For a perfect classifier the area under the ROC curve would be 1.
+Therefore, the higher the AUC we have greater confidence in the predictive nature of our model.
+
+
+### 10.2 Evaluating The Accuracy of `modelKNN`
+The "ModelKNN" has a AUC of 80%
+```{r}
+pred_churn_knn <- predict(modelKNN, newdata = test_df_knn, type = "response")
+roc_out_knn <- roc(test_df_knn$churn, pred_churn_knn)
+roc_out_knn
+```
+
+```{r}
+plot(roc_out_knn, col = "red", xlab = "False Positives", ylab = "True Positives")
+```
+
+## 11. Evaluating The Winining Model
+
+```{r}
+predicted_churn_status <- as.factor(pred_churn_rf > 0.2)
+levels(predicted_churn_status)  <- list(no = "FALSE", yes = "TRUE")
+confusion_matrix <- table(predicted_churn_status, actual_churn_status = test_df_rf$churn)
+
+confusion_matrix
+```
+
+The group reached a consesus on the threshold to use for our model. __0.2__ Provided the best confusion matrix, looking at our prediction churn status findings and our actual churn status findings, we found out our misclassification rate to be:
+
+__(186 + 81)/1547 errors - 1.73% misclassification rate, a relatively low rate.__
+
+# Model Predicition
+
+```{r warning = F}
+library("corrplot")
+```
+
+```{r}
+load("./data/customers_to_predict.Rdata")
+```
+
+## 12. Making The Prediction
+```{r}
+Churn_Prob <- predict(modelRF, newdata = Customers_To_Predict, type = "response")
+
+hist(Churn_Prob, 100)
+```
+
+`Churn_Prob` contains all the probalities (from 0 to 1) that a customer from a pool of 1000 customers will churn or not. The histogram above reveals the distribution of the probabilities of churn across the 1000 customers we predicted. The histogram tells us that most customers stayed meaning that they did not churn since the frequency of a customer not churning was higher between the probabilites of 0.0 to 0.5 with the larger subset between 0.0 to 0.2 (our group concluded that 0.5 was threshold for a customer churning or not). Previous research [^1] done on churn rate for wireless carriers suggested that the ideal churn rate was between 1.9 to 2.0.
+
+Another researcher further indicates that a good churn rate is between 5% to 7% annual or 0.42% - 0.58% monthly. This means that companies with acceptable churn only loose 1 out of every 200 customers per month [^2].
+
+Using the threshold (cutoff) of __0.2__ for churning that was concluded in the model building stage, we obtain the "yes" and "no" churn responses for the `Customers_To_Predict` dataframe.
+
+```{r}
+churn <- rep("no", nrow(Customers_To_Predict))
+churn[Churn_Prob > 0.2] = "yes"
+
+Customers_To_Predict$churn <- as.factor(churn) # Assign the responses into a variable called churn in the dataframe.
+```
+
+## 13. Insights from Prediction
+
+### 13.1 Churn Rate per State
+
+Given that we know the customers that churned or not, it would be advantageous to visualize the churn rate of customers in each state represented in `Customers_To_Predict` dataframe.
+
+```{r}
+calc.churn_rate <- function(churn) {
+  count_churn <- function(value) {
+    return (churn %>%
+              subset(churn == value) %>%
+              length())
+  }
+
+  num_yes <- count_churn("yes")
+
+  return(num_yes/length(churn) * 100)
+}
+
+state_churn_rate <- Customers_To_Predict %>%
+  select(state, churn) %>%
+  group_by(state) %>%
+  summarise(churn_rate = calc.churn_rate(churn))
+
+head(state_churn_rate)
+```
+
+```{r fig.width = 8, fig.height = 7}
+ggplot(state_churn_rate, aes(x = reorder(state, churn_rate),  y = churn_rate, fill = state)) +
+  geom_bar(stat = 'identity') +
+  coord_flip() +
+  theme_minimal() +
+  guides(fill = F) +
+  labs(x = "States", y = "Churn Rate", title = "Churn Rate of Customers per US State")
+```
+```{r echo = F}
+# us_map_data has all the data needed to plot the fifty states on a map
+us_map_data <- merge(
+  fifty_states,
+  data.frame(
+    # Add missing state DC
+    state = c(state.abb, "DC"),
+    id = tolower(c(state.name, "district of columbia"))
+  ),
+  by = "id",
+  all = T
+)
+```
+
+```{r echo = F}
+# We will merge the the state_churn_rate of the state in state_churn_rate to the us_map_data
+state_churn_rate <- merge(state_churn_rate, us_map_data, by = "state") %>%
+  select(id, churn_rate, long, lat, group) %>%
+  distinct()
+```
+
+```{r echo = F}
+# Using the state.center list we can find out the exact center of each state
+state_ctrs <- data.frame(
+    state = c(state.abb, "DC"),
+    c_long = c(state.center$x, 38.889931) ,
+    c_lat = c(state.center$y, -77.009003)
+  ) %>%
+  merge(us_map_data, ., by = "state") %>%
+  select(state, id, c_long, c_lat) %>%
+  distinct()
+```
+
+![Map of each State's Population as of 2013](./data/images/Map_of_each_state's_population_as_of_2013.svg)
+
+In turns of population, the states with the highest were CA, TX, NY. The states with the next highest included OH, PA, IL, AZ, and WA.
+
+```{r}
+ggplot(us_map_data, aes(x = long, y = lat)) +
+  geom_map(
+    map = us_map_data,
+    color="#ffffff",
+    aes(map_id = id)
+  ) +
+  geom_map(
+    data = state_churn_rate,
+    map = us_map_data,
+     color="#ffffff",
+    aes(fill = churn_rate, map_id = id)
+  ) +
+  scale_fill_continuous(low = 'thistle2', high = 'darkred', guide='colorbar') +
+  geom_text(
+    data = state_ctrs,
+    size = 2,
+    aes(x = c_long, y = c_lat, label = state)
+  ) +
+  coord_cartesian(xlim = c(-130, -65), ylim = c(24, 51)) +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text = element_blank(),
+    panel.background = element_blank(),
+    panel.border = element_blank()
+  ) +
+  labs(x = NULL, y = NULL, title = "Churn Rate of Customers per US State")
+```
+
+There seems to be a direct, but not perfect positive correlation between churn rates and population density. For example, the states typically with the highest churn rates where WA, UT, IL, OK, NJ, and NY. Those states with moderate churn included TX, MI, IA, IN, NV, MS, OK, and ME.
+
+From of the stepwise classification analysis, with churn as the dependent variable, we found that the following states from the initial model building were of interest (i.e., significant contribution in predicting churn at the .05 level or less): CA, ME, MI, MN, MS, MT, NJ, NV, SC, TX, UT, and WA.  Please note that the states ME, MS, NV, and UT were theoretically not statistically significant at the 0.05 but were approaching .05. In comparing the states with relatively higher population and churn rates (i.e., comparing the lists of moderate to highest for both) included CA, TX, and NY. Other states of interest include OH, PA, IL, AZ, IN, OK, ME, IL, and WA.
+
+
+### 13.2 How Predictors Affect Churn
+
+#### 13.2.1 Correlation of Numeric Predictors
+
+```{r}
+Customers_To_Predict %>%
+  select_if(.predicate = function(x) !is.factor(x)) %>%
+  cor() %>%
+  corrplot()
+```
+
+This correlation plot simply tells us that the more time spent calling (day, evening, or night) the more the charge. It is positive correlation between minutes spent in a call (day, evening, or night) and charges incurred (day, evening, or night). The negative correlations are very minuscule due to faded red regions present.
+
+#### 13.2.2 How does Number of Service Calls Affect Churn
+
+```{r}
+ggplot(Customers_To_Predict, aes(x = churn, y = number_customer_service_calls)) +
+  geom_bar(stat='identity', aes(fill = churn), width=.5)
+```
+
+The number of service calls has a direct correlation with churn. It can be said that customers with more number of service calls are satisfied with the customer service provided by ABC wireless and choose not to churn.
+
+On the other hand customers with lower number of service calls are not happy with the resolutions of their issues and become more likely to churn.
+
+We recommend that ABC Wireless improves on their customer service call center and keep in regular contact with their customers in order to improve their retention rate of existing customers.
+
+#### 13.2.3 How does Total Day Calls and Total Day Charges Affect Churn
+
+```{r warning = F}
+ggplot(data = Customers_To_Predict, aes(total_eve_minutes, total_day_calls, color = churn)) +
+  geom_smooth(method = "loess", se = FALSE, formula = y ~ poly(x, 2))
+```
+
+As shown in the graph there is a dipolar relationship, the people who did not churn were catergorized by low total evening minutes and lower total day calls; resulting in higher totals and evening minutes and day calls.
+
+For those who churned the opposite were true. We recommend that ABC wireless offers more competitive packages that take advantage of these dipolar relationships
+
+#### 13.2.4 Total International Calls and Total International Charges Affect Churn
+
+```{r warning = F}
+ggplot(data = Customers_To_Predict, aes(total_intl_calls, total_intl_charge, color = churn:international_plan)) +
+  geom_smooth(method = "loess", se = FALSE, formula = y ~ poly(x, 2))
+```
+
+For those who do not churn and do not have internation plan, they still make the most total international calls with initially the highest total international charges (we suspect these customers to be new ones). There appears to be a middle range between 3 and 8 on the x-axis that is the same for all users, for those that did churn and did not have an international plan (green curve) had higher total international charges.
+
+We recommend that ABC wireless should promote their international plans more competitevely in order to reduce churn.
+
+__NOTE__: We focused on only the numerical variables `total_intl_charge`, `total_intl_calls`, `total_eve_minutes`, `total_eve_charge` and categorical variable `international_plan` when discussing their affect on `churn` due to time constraint and their sign and size of their coefficients and statistical significance.
+
+# References
+
+[^1]: FierceWireless. (n.d.). Average monthly churn rate for wireless carriers in the United States from 1st quarter 2013 to 1st quarter 2018. In Statista - The Statistics Portal. Retrieved November 25, 2018, from https://www.statista.com/statistics/283511/average-monthly-churn-rate-top-wireless-carriers-us/.
+[^2]: https://www.facebook.com/LincolnMurphyShares. (2015, July 30). SaaS Churn Rate - What’s Acceptable? Retrieved November 25, 2018, from https://sixteenventures.com/saas-churn-rate

@@ -1,0 +1,313 @@
+---
+title: "Data Exploration"
+output: html_notebook
+---
+
+```{r warning = F}
+library("dplyr")
+library("magrittr")
+library("ggplot2")
+library("fiftystater")
+```
+
+## 1. Feel of the data
+
+We will first get a feel for our data set by getting a summary of the dataframe `churn_df`.
+
+```{r}
+churn_df <- read.csv("data/churn_train.csv", na.strings = c("", "NA"))
+
+summary(churn_df)
+```
+
+From the summary we can see that a lot of `NA` values are present in many columns execpt for the columns (variables) `state`, `area_code`, `international_plan`, `voice_mail_plan`, `total_night_calls`, and `churn`.
+
+Out of the 6 variables that don't have any `NA`s in them 5 are factors named `r churn_df %>% select_if(is.factor) %>% names() %>% sapply(function(x) sprintf("'%s'", x))`. Five is also the total number of factors that can be observed in our data set, the rest are numerical variables.
+
+If we take a closer look at the factor variables, the variable `state` seems to represent states from the USA (51 states in total). Below is a frequency table and a histogram showing us where most of the customers observed in the churn dataset come from in the US.
+
+```{r}
+state_freq <- churn_df %>%
+  select(state) %>%
+  group_by(state) %>%
+  summarise(freq  = n()) %>%
+  arrange(desc(freq))
+
+state_freq
+```
+
+```{r fig.width = 8, fig.height = 7}
+ggplot(state_freq, aes(x = reorder(state, freq), y = freq, fill = state)) +
+  geom_bar(stat = 'identity') +
+  coord_flip() +
+  theme_minimal() +
+  guides(fill = F)
+```
+
+From the table and the histogram above we can see that __West Virginia__ represents most the customers with a total of __106__ customers. However, let's see a visual representation of the density of customers on a map.
+
+```{r echo = F}
+# us_map_data has all the data needed to plot the fifty states on a map
+us_map_data <- merge(
+  fifty_states,
+  data.frame(
+    # Add missing state DC
+    state = c(state.abb, "DC"),
+    id = tolower(c(state.name, "district of columbia"))
+  ),
+  by = "id",
+  all = T
+)
+```
+
+```{r echo = F}
+# We will merge the the frequencies of the state in state_freq to the us_map_data
+state_freq <- merge(state_freq, us_map_data, by = "state") %>%
+  select(id, freq, long, lat, group) %>%
+  distinct()
+```
+
+```{r echo = F}
+# Using the state.center list we can find out the exact center of each state
+state_ctrs <- data.frame(
+    state = c(state.abb, "DC"),
+    c_long = c(state.center$x, 38.889931) ,
+    c_lat = c(state.center$y, -77.009003)
+  ) %>%
+  merge(us_map_data, ., by = "state") %>%
+  select(state, id, c_long, c_lat) %>%
+  distinct()
+```
+
+```{r}
+ggplot(us_map_data, aes(x = long, y = lat)) +
+  geom_map(
+    map = us_map_data,
+    color="#ffffff",
+    aes(map_id = id)
+  ) +
+  geom_map(
+    data = state_freq,
+    map = us_map_data,
+     color="#ffffff",
+    aes(fill = freq, map_id = id)
+  ) +
+  scale_fill_continuous(low = 'thistle2', high = 'darkred', guide='colorbar') +
+  geom_text(
+    data = state_ctrs,
+    size = 2,
+    aes(x = c_long, y = c_lat, label = state)
+  ) +
+  coord_cartesian(xlim = c(-130, -65), ylim = c(24, 51)) +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text = element_blank(),
+    panel.background = element_blank(),
+    panel.border = element_blank()
+  ) +
+  labs(x = NULL, y = NULL, title = "Density of customers per US state")
+```
+
+## 2. What's Up With The Negatives
+
+From the output of the summary we noticed that some variables had negative values present in them, let's take a look at those variables:
+
+```{r}
+churn_df %>%
+  select(account_length, number_vmail_messages) %>%
+  summary()
+```
+
+`account_length` has values ranging from -209 and 243. The variable `account_length` is not immediatley obvious what it represents but in the domain of this data set, `account_length` represents how long a customer has had an account in terms of months (we are assuming `account_length` is in months). With that being said `account_length` should not contain any negative values.
+
+`number_vmail_messages` has values ranging from -10 to 51, this variable represents the number of voice mail messages a customer has had, clearly such a variable should not have negative values in them.
+
+## 3. NAs Everywhere
+
+16 out of the 20 variables (columns) have `NA` values where `NA` means that the value is missing. Further analysis of the summary of our dataframe reveals that 10 variables have about __200__ `NA` values while 2 have __301__ and 1 has __501__.
+
+For a better understanding of the presence of `NA`s in our dataframe. Let's look at the percentage of `NA`s accross all the variables in the dataframe.
+
+```{r}
+# A function to compute the percentage of NAs accross all columns.
+na_percentage <- function(df, fmt = F) {
+  return (df %>%
+            is.na() %>%
+            colMeans() %>%
+            sapply(function(x) {
+              if (fmt) {
+                return(sprintf("%.5f%%", x * 100))
+              }
+
+              return (x)
+            })
+          )
+}
+
+na_percent_df <- na_percentage(churn_df) %>%
+  data_frame(Columns = names(.), `NA %` = .) %>%
+  mutate_at(
+    vars(`NA %`),
+    funs(round(. * 100, 2))
+  ) %>%
+  mutate(label = sprintf("%g%%", `NA %`)) %>%
+  arrange(desc(`NA %`))
+
+na_percent_df %>% select(-label)
+```
+
+The table above lists all the variables (columns) and their respective percentage of `NA`s. We can see that most categorical variables such as `state`, `area_code`, `international_plan`, etc. including `total_night_calls` (numerical variable) have no `NA` values in them.
+
+The bar chart below provides a visual representation of the percentage of `NA` in the dataset. We can see that `account_length`, `total_intl_calls` and `total_intl_charge` contribute the most `NA`s with `account_length` being the top contributor.
+
+```{r}
+na_percent_df %>%
+  filter(`NA %`> 0) %>%
+  ggplot(aes(x = Columns, y = `NA %`, fill = Columns)) +
+  geom_bar(stat="identity") +
+  guides(fill = F) +
+  coord_flip() +
+  geom_text(aes(label = label), hjust = 1.6, size = 3.5) +
+  theme_minimal()
+```
+
+Further analysis of the `NA` percentage table, we noticed that 11 variables have an `NA` percentage of __6%__. Such a pattern is interesting and deserves a closer look.
+
+Below is a table that shows only the variables that have `NA` in them. The code chunk removes columns that have an `NA` percentage of __0%__ and then only shows rows that have at least 1 `NA` value in them.
+
+
+```{r}
+na_df <- churn_df %>%
+  select(-state, -area_code, -international_plan, -voice_mail_plan, -total_night_calls, -churn) %>%
+  filter_all(any_vars(is.na(.)))
+
+na_df
+```
+
+```{r echo = F}
+na_df_stats <- na_df %>%
+  is.na() %>%
+  rowMeans() %>%
+  data_frame(`NA %` = .) %>%
+  group_by(`NA %`) %>%
+  summarise(freq = n()) %>%
+  mutate_at(
+      .vars = vars(`NA %`),
+      .funs = function(x) sprintf("%.2f%%", x * 100)
+  )
+```
+
+
+We can see that there are many `NA` values present in this the `r nrow(na_df)` row subset of our data set. There are `r na_df_stats$freq[1]` rows that have at least __1__ `NA` in one of their columns while `r na_df_stats$freq[2]` rows have all its elements consisting of completely `NA` values.
+
+## 4. Preliminary Data Cleaning
+
+### 4.1 Turning Negatives into Positives
+
+In order to deal with those variables that have negative values in them, the simple strategy is to turn all the numbers for each variable in question to positive using the `abs` function.
+
+```{r}
+churn_df <- churn_df %>%
+  mutate_at(.vars = vars(account_length, number_vmail_messages), .funs = funs(abs))
+
+summary(churn_df)
+```
+
+From the summary table, we can see that all our variables are positive. `account_length` ranges from 1 to 243 and `number_vmail_messages` ranges from 0 to 51.
+
+### 4.2 No More NAs
+
+Rows in which we have discovered that are completely filled up with `NA` values pose a problem for us. The problem is that they don't have enough data in them which we can use for predicting churn. Each row represents a customer and if a row has 14 elements (representing the 14 columns) consisting of `NA` then that customer is essentially incosiquential in the training of our model.
+
+Imputing of missing values is an approach to solving this problem but in this particular case it would be pointless to do so for rows which have so much of its predictive power missing. There are some rows in which we can impute missing values in, these rows can be salvaged because the percentage of `NA`s in them is not 100%.
+
+The best course of action is to remove rows that have more than __75%__ of its elements that are `NA`. __75%__ is an arbitrary threshold that has been chosen based on the consesus of the group which we believe will keep rows that are salvageable and remove the rows that are unimportant.
+
+```{r}
+churn_df_1 <- churn_df[rowMeans(is.na(churn_df)) <= 0.25,]
+summary(churn_df_1)
+```
+
+Let's look at the percentage of `NA`s in the data set after removing rows with __75%__ of its elements being `NA` and how its has changed.
+
+```{r}
+na_df_1 <- na_percentage(churn_df_1) %>%
+  data_frame(Columns = names(.), `NA %` = .) %>%
+  mutate_at(
+    vars(`NA %`),
+    funs(round(. * 100, 2))
+  ) %>%
+  mutate(label = sprintf("%g%%", `NA %`)) %>%
+  arrange(desc(`NA %`))
+
+na_df_1
+```
+
+Let's look at a visual presentation of how the `NA` values have changed.
+
+```{r}
+na_df_1 %>%
+  filter(`NA %`> 0) %>%
+  ggplot(aes(x = Columns, y = `NA %`, fill = Columns)) +
+  geom_bar(stat="identity") +
+  guides(fill = F) +
+  coord_flip() +
+  geom_text(aes(label = label), hjust = 1.6, size = 3.5) +
+  theme_minimal()
+```
+
+Let's subset our dataset and look at the columns we initially identified has having at least 1 NA in them.
+
+```{r}
+churn_df_1 %>%
+  select(-state, -area_code, -international_plan, -voice_mail_plan, -total_night_calls, -churn) %>%
+  filter_all(any_vars(is.na(.)))
+```
+
+The number of rows initially was 703 and now its 503, we have removed the __200__ rows where the population of `NA`s were 75%, reducing our overall dataset from __`r nrow(churn_df)`__ to __`r nrow(churn_df_1)`__.
+
+Now that we have removed rows which had very little information in them, we can focus on figuring out a strategy on filling in the missing values of our remaining 503 rows.
+
+### 4.3 The Remaining NAs
+
+```{r echo = F}
+sumNa <- churn_df_1 %>%
+  summarise(value = sum(is.na(.)))
+```
+
+We have about `r sumNa$value` `NA` values in total in our dataset of which `account_length` owns 9.61% of it while `total_eve_minutes` and `total_intl_class` both own 3.22%.
+
+Looking at `account_length` we were not convinced that it was statistically significant or that it had any predictive power when it came to predicting churn. In order to investigate our hypothesis, we compared the correlation of `churn` and  `account_length` using a box plot as seen below. The aim is to see whether `account_length` can clearly differentiate between __no__ and __yes__.
+
+```{r}
+ggplot(churn_df_1, aes(churn, account_length)) +
+  geom_boxplot()
+```
+
+The boxplot tells us that `account_length` can not differentiate between __no__ and __yes__. As `account_length` increases the number of __no__ and __yes__ varies very little meaning `account_length` is not a good predictor of `churn`. 
+
+Upon validating our hypothesis, we decided on moving forward with the descision to omit `account_length` from the dataset. The benefit of this is that we get rid of the __301__ `NA` values in our dataset, which we would have had to spend time imputing for if we had kept `account_length`.
+
+The descision of omitting `account_length` from our data set benefits us in that 
+
+1. It helps us avoid spending uneccesary effort in imputing a large percentage of missing values contributed by `account_length`
+2. We remove a variable that has neither predictive power or is statistically significance.
+
+## 5. Concluding The Exploration
+
+We will omit `account_length` from our data set and then view the summary.
+
+```{r}
+churn_df_2 <- churn_df_1 %>% select(-account_length)
+
+summary(churn_df_2)
+```
+
+Currently we have only __`r sum(is.na(churn_df_2))`__ `NA` values essentially removing __301__ `NA` values from `account_length`. We now need to impute values for __`r sum(is.na(churn_df_2))`__ `NA`s
+
+We will save the data frame, `churn_df_2`, that has gone through the preliminary data cleaning phase for data imputation.
+
+```{r}
+save(churn_df_2, file = "data/data_exploration.rda")
+```
+

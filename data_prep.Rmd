@@ -1,0 +1,331 @@
+---
+title: "Data Preparation"
+output: html_notebook
+---
+
+```{r warning = F}
+library("dplyr")
+library("magrittr")
+library("ggplot2")
+library("randomForest")
+library("DMwR") # for kNN imputation
+```
+
+```{r echo = F}
+load("./data/data_exploration.rda")
+```
+
+## 1. Data Imputation
+
+### 1.1 Data Imputation using RandomForest
+
+The proximity matrix from the randomForest is used to update the imputation of the NAs. For continuous predictors, the imputed value is the weighted average of the non-missing observations, where the weights are the proximities. For categorical predictors, the imputed value is the category with the largest average proximity. This process is iterated n times.
+
+```{r results = 'hide'}
+cdf_rf.imputed <- rfImpute(churn ~ ., data = churn_df_2)
+```
+
+```{r}
+summary(cdf_rf.imputed)
+```
+
+### 1.2 Data Imputation using kNN
+
+kNN is useful for matching a point with its closest k neighbors in a multi-dimensional space and can be used for data that are continuous, discrete, ordinal and categorical which makes it particularly useful for dealing with most kinds of missing data.The assumption behind using KNN for missing values is that a point value can be approximated by the values of the points that are closest to it, based on other variables.
+When using KNN, you have to take many parameters into consideration: 
+The number of neighbors to look for. Taking a low k will increase the influence of noise and the results are going to be less generalizable while taking a high k will tend to blur local effects which are exactly what we are looking for.
+The aggregation method to use. Here we allow for arithmetic mean, median and mode for numeric variables and mode for categorical ones.
+Normalizing the data is a method that allows to give every attribute the same influence in identifying neighbors when computing certain type of distances like the Euclidean one.The algorithm automatically normalize the data when both numeric and categorical variable are provided.
+Numeric attribute distances: among the various distance metrics available, we will focus on the main ones, Euclidean and Manhattan. Euclidean is a good distance measure to use if the input variables are similar in type (e.g. all measured widths and heights). Manhattan distance is a good measure to use if the input variables are not similar in type (such as age, height, etc.).
+Categorical attribute distances: without prior transformation, applicable distances are related to frequency and similarity. Here we allow the use of two distances: Hamming distance and the Weighted Hamming distance. 
+- Hamming distance: take all the categorical attributes and for each, count one if the value is not the same between two points. The Hamming distance is then the number of attributes for which the value was different. 
+- Weighted Hamming distance: also return one if the value is different, but returns the frequency of the value in the attribute if they are matching, increasing the distance when the value is more frequent. When more than one attribute is categorical, the harmonic mean is applied. The result remain between zero and one but the mean value is shifted toward the lower values compared to the arithmetic mean.
+Binary attribute distances: those attributes are generally obtained via categorical variables transformed into dummies.
+
+```{r}
+cdf_knn.imputed <- knnImputation(churn_df_2)
+```
+
+```{r}
+summary(cdf_knn.imputed)
+```
+
+### 1.3 kNN vs RandomForest for Data Imputation
+
+In order to compare the the values imputed using kNN and RandomForest we must first extract the indexes in `churn_df_2` where there was an `NA`. Since both RandomForest and kNN only imputes values where there `NA` exists, we only have to look at the variables `total_intl_calls` and `total_eve_minutes` in which values were imputed.
+
+```{r}
+where.is_na <- function(df, var_name) {
+  return(which(is.na(extract(df, var_name))))
+}
+
+only.where_was_na <- function(df, var_name) {
+  return(df %>%
+           extract2(var_name) %>%
+           extract(where.is_na(churn_df_2, var_name))
+         )
+}
+
+# Create a data frame of all the imputed values from variables total_intl_calls and total_eve_minutes
+rf_knn_df <- data.frame(
+  kNN_total_intl_calls = cdf_knn.imputed %>% only.where_was_na("total_intl_calls"),
+  rf_total_intl_calls = cdf_rf.imputed %>% only.where_was_na("total_intl_calls"),
+  kNN_total_eve_minutes = cdf_knn.imputed %>% only.where_was_na("total_eve_minutes"),
+  rf_total_eve_minutes = cdf_rf.imputed %>% only.where_was_na("total_eve_minutes")
+)
+
+rf_knn_df
+```
+
+The below plots show a visual representation of the imputed values from variables `total_intl_calls` and `total_eve_minutes` using both the kNN and RandomForest methods.
+
+```{r}
+ggplot(rf_knn_df) +
+  geom_point(aes(
+    x = seq_along(kNN_total_intl_calls),
+    y = kNN_total_intl_calls, colour = "kNN")
+  ) +
+  geom_point(aes(
+    x = seq_along(rf_total_intl_calls),
+    y = rf_total_intl_calls, colour = "Rainforest")
+  ) +
+  labs(x = "Index", y = "total_intl_calls", title = "kNN vs Rainforest for total_intl_calls")
+```
+
+For total_intl_calls:
+When using kNN for imputation, as the value of x increases, the kNN values are spread across 2.1 and 6.5 on the y-axis. Majority of the points lie in between 3.5 and 5 on the y-axis. It can be observed that as y increases, the values are more widespread and dispersed for values imputed using kNN.
+
+In the case of using RandomForest for imputation, the proximity of the values is high and in a narrow band. Majority of the points lie within a range of 4 and 5 on the y-axis. The values imputed by RandomForest vary very little having a more uniform dispersion along the x-axis compared to kNN.
+
+```{r}
+ggplot(rf_knn_df) +
+  geom_point(aes(
+    x = seq_along(kNN_total_eve_minutes),
+    y = kNN_total_eve_minutes, colour = "kNN")
+  ) +
+  geom_point(aes(
+    x = seq_along(rf_total_eve_minutes),
+    y = rf_total_eve_minutes, colour = "RandomForest")
+  ) +
+  labs(x = "Index", y = "total_eve_minutes", title = "kNN vs RandomForest for total_eve_minutes")
+```
+
+For total_eve_minutes:
+As `total_eve_minutes` on the y-axis increases, the values imputed by RandomForest are distributed across a broad ranging between 250 & 470 on the y-axis. Moving along the x-axis values imputed by RandomForest range quite a bit on the y-axis.
+
+Whereas for kNN, the values lie within a range of 100 - 350 on the y-axis. As you move along the x-axis you can observer that the variation of points change very little on the y-axis unlike values imputed by RandomForest.
+
+## 2. Stepwise Regression
+
+Stepwise regression is a semi-automated process of building a model by successively adding or removing variables based on the t-statistics of their estimated coefficients. The stepwise option lets you either begin with no variables in the model and proceed forward (i.e., adding one variable at a time) or start with all potential variables in the model and proceed backwards (i.e., removing one variable at a time). At each step, the program performs for each variable currently in the model the t-statistic for its estimated coefficient. For each variable not in the model, it computes the t-statistic that its coefficient would have if it were the next variable added, and squares it. At the next step, the program automatically enters the variable with the highest statistic (forward), or removes the variable with the lowest statistic (backward). In general, as in this case, if you have a modest-sized set of potential variables from which you wish to eliminate a few (i.e., if you're fine-tuning some prior selection of variables), you should generally go backward.
+
+Stepwise Logistic Regression with R Akaike information criterion (AIC), where AIC = 2k - 2 log L = 2k + Deviance, where k = number of parameters. In general, smaller numbers are better.  Stepwise Logistic Regression penalizes models with many independent or predictor parameters and with models with poor fit.  In general, the lower value of AIC suggests "better" model, but it is a relative measure of model fit. It is used for model selection (i.e. it lets you compare different models estimated on the same dataset. Backwards selection is the default in the Logistic Regression method, although there may be some evidence in the logistic regression literature that backward selection is less successful than forward selection. This may be due to the fact that the full model fit in the first step is the model most likely to result in a complete or quasi-complete separation of response values. However, backward seemed to be successful in this case. As a warning, since the interpretation of coefficients in a model depends on the other terms included, it may seem unwise to let an automatic algorithm determine the questions that we should ask about our data. The decision which variables to include into an analysis should be based on theory. However, there is little theory about these variables, so we need to operate on common business application.
+
+### 2.1 Stepwise Regression using kNN Imputed Data
+
+Using Stepwise Regression, we proceed to identify the variables that may have a significant impact in determining 'churn', using the kNN imputed values. The chunk also identifies states which may be impacted by churn.
+
+```{r}
+churn_model_knn <- glm(churn~., data = cdf_knn.imputed, family = "binomial")
+summary(churn_model_knn)
+```
+
+From the output of the churn model using stepwise regression on kNN imputed data, we see that the variables number_customer_service_calls, total_day_charge, international_planyes, total_intl_calls, voice_mail_planyes are projected to have a likely impact on 'churn' with the variables total_eve_minutes and total_day_minutes tending towards significance. The output also points towards states that may experience a higher churn rate than others (shown by * as well as by .). We will refine this output in the following steps using direction, backward and both.
+
+
+Using the 'backward' option, we proceed to identify the variables that have a significant impact in determining 'churn', using the kNN imputed values.
+
+```{r}
+stepwise_knn_bkwd = step(churn_model_knn, direction = c("backward"), trace = F)
+```
+
+
+```{r}
+summary(stepwise_knn_bkwd)
+```
+
+Continuing to refine the model with stepwise regression on kNN imputed data but including direction as 'backward', the model outputs the variables international_planyes, voice_mail_planyes, total_day_minutes, total_day_charge, total_eve_minutes, total_night_minutes, total_intl_calls, total_intl_charge and number_customer_service_calls as being significant towards predicition of churn.
+
+
+Continuing with using Stepwise Regression but amending direction to 'both', we again proceed to identify the variables that may have a significant impact in determining 'churn', using the kNN imputed values.
+The outputs from both chunks - direction backward & both - is seen to be identical in all respects.
+
+
+```{r}
+stepwise_knn_bth = step(churn_model_knn, direction = c("both"), trace = F)
+```
+
+
+```{r}
+summary(stepwise_knn_bth)
+```
+
+Continuing with stepwise regression on kNN imputed data but amending direction to 'both', the model outputs the variables international_planyes, voice_mail_planyes, total_day_minutes, total_day_charge, total_eve_minutes, total_night_minutes, total_intl_calls, total_intl_charge and number_customer_service_calls as being significant.
+We notice that these variables are the same as those identified in the 'backward' direction with AIC at 2060.2
+
+
+### 2.2 Stepwise Regression using Randomforest Imputed Data
+
+Using Stepwise Regression, we proceed to identify the variables that may have a significant impact in determining 'churn', using the RandomForest imputed values. The chunk also identifies states which may be impacted by churn.
+
+```{r}
+churn_model_rf <- glm(churn~., data = cdf_rf.imputed, family = "binomial")
+summary(churn_model_rf)
+```
+
+From the output of the churn model using stepwise regression on RandomForest imputed data, we see that the 6 variables number_customer_service_calls, total_day_charge, international_planyes, total_intl_calls, voice_mail_planyes and total_eve_charge are projected to have a likely impact on 'churn'. The output also points towards states that may experience a higher churn rate than others (shown by * as well as by .). We will refine this output in the following steps using direction, backward and both.
+
+Using the 'backward' option, we proceed to identify the variables that have a significant impact in determining 'churn', using the RandomForest imputed values.
+
+```{r}
+stepwise_rf_bkwd = step(churn_model_rf, direction = c("backward"), trace = F)
+```
+
+```{r}
+summary(stepwise_rf_bkwd)
+```
+
+Continuing with using Stepwise Regression and the RandomForest imputed values, but amending direction to 'both', we again proceed to identify the variables that may have a significant impact in determining 'churn'.
+
+On comparison of the outputs from both chunks - direction backward & both - it is seen to be identical in all respects.
+
+
+```{r}
+stepwise_rf_bth = step(churn_model_rf, direction = c("both"), trace = F)
+```
+
+```{r}
+summary(stepwise_rf_bth)
+```
+
+In general, the best model is the one with the lowest AIC possible in the logistic regression model with churn as the dependent variable. The final model with the most important variables in predicting churn were, in ascending order:
+
+1. `total_day_minutes`
+2. `total_night_minutes`
+3. `total_intl_charge`
+4. `total_eve_charge`
+3. `voice_mail_plan`
+4. `total_day_charge `
+5. `number_customer_service_calls`
+6. `international_plan`
+
+In other words, `international_plan` was considered the best predictor of churn followed by `number_customer_service_calls` etc. In backward, starting out with the full model, the single best predictor was `international_plan`.  This procedure was used to help in the creation of a best predicted model for churn as the dependent variable.
+
+### 2.3 Finding The Best Predictor Variables
+
+```{r echo = F}
+fmt_formula <- function(formula) {
+  return (formula %>%
+            as.character() %>%
+            extract(c(2, 1, 3)) %>%
+            paste(collapse = '')
+  )
+}
+```
+
+The table below shows the final models obtained from performing step wise regression in __backward__ direction. On the left we have the model using the RandomForest imputed missing values and on the right we have the model using the kNN imputed missing values.
+
+||RandomForest|kNN|
+|-----|:------|:-----|
+|AIC|`r stepwise_rf_bkwd$aic`|`r stepwise_knn_bkwd$aic`|
+|Formula|`r {fmt_formula(stepwise_rf_bkwd$formula)} `| `r {fmt_formula(stepwise_knn_bkwd$formula)} `|
+
+The table below shows the final models obtained from performing step wise regression in __both__ direction. On the left we have the model using the Rainforest imputed missing values and on the right we have a model using the kNN imputed missing values.
+
+||RandomForest|kNN|
+|-----|:------|:-----|
+|AIC|`r stepwise_rf_bth$aic`|`r stepwise_knn_bth$aic`|
+|Formula|`r {fmt_formula(stepwise_rf_bth$formula)} `| `r {fmt_formula(stepwise_knn_bth$formula)} `|
+
+
+The common variables in each of the four stepwise regressions are:
+
+1. `international_plan`
+2. `voice_mail_plan`
+3. `total_day_minutes`
+4. `total_day_charge`
+5. `total_night_minutes`
+6. `total_intl_calls`
+7. `total_intl_charge`
+8. `number_customer_service_calls`
+
+The variables that are not common to the four models are:
+
+1. `total_eve_minutes`
+2. `total_eve_charge`
+
+We suggest that these 10 variables be used in the next stage of the model building process.
+
+__Random forest significant attributes__
+```
+international_planyes          2.1972515  0.1589164  13.826  < 2e-16 ***
+voice_mail_planyes            -1.0275099  0.3676354  -2.795 0.005191 **
+total_day_charge               0.0805890  0.0080508  10.010  < 2e-16 ***
+total_eve_charge               0.0830480  0.0249265   3.332 0.000863 ***
+total_intl_calls              -0.0837351  0.0267472  -3.131 0.001744 **
+number_customer_service_calls  0.5395426  0.0420437  12.833  < 2e-16 ***
+```
+***
+```
+states (12)
+
+stateCA                        1.9772622  0.7938041   2.491 0.012743 *
+stateME                        1.2932594  0.7391097   1.750 0.080161 .
+stateMI                        1.4919750  0.7224169   2.065 0.038899 *
+stateMN                        1.2142000  0.7194116   1.688 0.091456 .
+stateMS                        1.2761173  0.7383695   1.728 0.083936 .
+stateMT                        1.7768485  0.7233884   2.456 0.014038 *
+stateNJ                        1.5639891  0.7174847   2.180 0.029271 *
+stateNV                        1.3044053  0.7301848   1.786 0.074034 .
+stateSC                        1.7432299  0.7519276   2.318 0.020430 *
+stateTX                        1.6774593  0.7127652   2.353 0.018600 *
+stateUT                        1.2332761  0.7465346   1.652 0.098534 .
+stateWA                        1.5031936  0.7340795   2.048 0.040587 *
+```
+Only RandomForest had an additional state MN as compared to KNN
+
+__KNN significant attributes__
+```
+international_plan             2.205e+00  1.594e-01  13.835  < 2e-16 ***
+voice_mail_plan               -1.252e+00  4.395e-01  -2.849  0.00438 **
+total_day_minutes             -5.762e-03  2.240e-03  -2.572  0.01010 *
+total_day_charge               1.074e-01  1.375e-02   7.813 5.58e-15 ***
+total_eve_minutes              1.106e-02  4.403e-03   2.511  0.01204 *
+total_intl_calls              -8.585e-02  2.679e-02  -3.205  0.00135 **
+number_customer_service_calls  5.432e-01  4.221e-02  12.868  < 2e-16 ***
+```
+***
+```
+states(11)
+stateCA                        1.956e+00  7.908e-01   2.473  0.01339 *
+stateME                        1.256e+00  7.389e-01   1.700  0.08904 .
+stateMI                        1.465e+00  7.217e-01   2.030  0.04234 *
+stateMS                        1.253e+00  7.375e-01   1.699  0.08926 .
+stateMT                        1.754e+00  7.235e-01   2.424  0.01535 *
+stateNJ                        1.539e+00  7.166e-01   2.148  0.03173 *
+stateNV                        1.217e+00  7.316e-01   1.663  0.09632 .
+stateSC                        1.735e+00  7.498e-01   2.314  0.02064 *
+stateTX                        1.674e+00  7.108e-01   2.355  0.01852 *
+stateUT                        1.229e+00  7.463e-01   1.646  0.09968 .
+stateWA                        1.471e+00  7.321e-01   2.009  0.04455 *
+```
+__We recommend the following states for the initial model building__
+```
+stateCA
+stateME
+stateMI
+stateMN
+stateMS
+stateMT
+stateNJ
+stateNV
+stateSC
+stateTX
+stateUT
+stateWA
+```
+We will save the data frames, `cdf_knn.imputed` and `cdf_rf.imputed` for the model building process.
+
+```{r}
+save(cdf_knn.imputed, cdf_rf.imputed, file = "data/data_prep.rda")
+```
